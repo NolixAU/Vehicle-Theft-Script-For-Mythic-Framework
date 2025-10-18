@@ -84,6 +84,31 @@ local function RegisterCallbacks()
     end)
 end
 
+local function clearRemovedWheelState(entityWrapper, wheelIndex)
+    if not entityWrapper or not entityWrapper.state or not wheelIndex then return end
+
+    local currentRemoved = entityWrapper.state.wheelTheftRemoved
+    if type(currentRemoved) ~= 'table' then return end
+
+    local targetKey = tostring(wheelIndex)
+    local updated = {}
+
+    for key, removed in pairs(currentRemoved) do
+        if removed then
+            local numericKey = tonumber(key)
+            if key ~= targetKey and numericKey ~= wheelIndex then
+                updated[key] = true
+            end
+        end
+    end
+
+    if next(updated) then
+        entityWrapper.state:set('wheelTheftRemoved', updated, true)
+    else
+        entityWrapper.state:set('wheelTheftRemoved', nil, true)
+    end
+end
+
 local function RegisterItems()
     Inventory.Items:RegisterUse('torque_wrench', 'WheelTheft', function(source, item)
         TriggerClientEvent('WheelTheft:Client:UseTorqueWrench', source)
@@ -93,6 +118,34 @@ local function RegisterItems()
         TriggerClientEvent('WheelTheft:Client:UseWheelItem', source)
     end)
 end
+
+RegisterNetEvent('WheelTheft:Server:RestoreWheel', function(netId, wheelIndex)
+    local src = source
+    local targetIndex = tonumber(wheelIndex)
+    if not netId or not targetIndex then return end
+
+    local veh = NetworkGetEntityFromNetworkId(netId)
+    if not veh or not DoesEntityExist(veh) then return end
+
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return end
+
+    local pedCoords = GetEntityCoords(ped)
+    local vehCoords = GetEntityCoords(veh)
+
+    if #(pedCoords - vehCoords) > 30.0 then return end
+
+    local entityWrapper = Entity(veh)
+    if not entityWrapper or not entityWrapper.state then return end
+
+    local currentRemoved = entityWrapper.state.wheelTheftRemoved
+    if type(currentRemoved) ~= 'table' then return end
+
+    local stateKey = tostring(targetIndex)
+    if not currentRemoved[stateKey] and not currentRemoved[targetIndex] then return end
+
+    clearRemovedWheelState(entityWrapper, targetIndex)
+end)
 
 AddEventHandler('Core:Shared:Ready', function()
     exports['mythic-base']:RequestDependencies('WheelTheft', {
