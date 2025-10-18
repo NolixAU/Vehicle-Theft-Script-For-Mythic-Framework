@@ -8,6 +8,8 @@ local wheelBones = {
 local Callbacks, Minigame, Notification, Targeting
 local activeAttempt = false
 local heldWheelProp
+local trackedRemovedWheels = {}
+local pendingRestoreAttempts = {}
 
 local SET_VEHICLE_WHEEL_HAS_TIRE = 0x6E13FC662B882D1D
 
@@ -160,13 +162,13 @@ local function attachHeldWheel()
     AttachEntityToEntity(
         heldWheelProp,
         ped,
-        GetPedBoneIndex(ped, 28422), 
+        GetPedBoneIndex(ped, 28422),
         0.0,
-        0.0,   
-        0.10, 
-        0.0,   
-        90.0,  
-        0.0,  
+        0.0,
+        0.10,
+        0.0,
+        90.0,
+        0.0,
         true, true, false, true, 1, true
     )
 
@@ -185,13 +187,82 @@ RegisterNetEvent('WheelTheft:Client:UseWheelItem', function()
     TriggerEvent('WheelTheft:Client:ToggleWheelCarry')
 end)
 
-local function applyRemovedWheels(entity, removedWheels)
+local function canAttemptRestore(netId, wheelIndex)
+    local attempts = pendingRestoreAttempts[netId]
+    if not attempts then return true end
+
+    local lastAttempt = attempts[wheelIndex]
+    if not lastAttempt then return true end
+
+    return (GetGameTimer() - lastAttempt) >= 3000
+end
+
+local function noteRestoreAttempt(netId, wheelIndex)
+    if not pendingRestoreAttempts[netId] then
+        pendingRestoreAttempts[netId] = {}
+    end
+
+    pendingRestoreAttempts[netId][wheelIndex] = GetGameTimer()
+end
+
+local function clearRestoreAttempts(netId)
+    pendingRestoreAttempts[netId] = nil
+end
+
+local function applyRemovedWheels(netId, entity, removedWheels)
     if not DoesEntityExist(entity) or type(removedWheels) ~= 'table' then return end
+
     for wheelIndex, removed in pairs(removedWheels) do
         if removed then
             local index = tonumber(wheelIndex) or wheelIndex
-            removeVehicleWheel(entity, index)
+
+            if vehicleWheelHasTire(entity, index) then
+                if canAttemptRestore(netId, index) then
+                    noteRestoreAttempt(netId, index)
+                    TriggerServerEvent('WheelTheft:Server:RestoreWheel', netId, index)
+                end
+            else
+                removeVehicleWheel(entity, index)
+            end
         end
+    end
+end
+
+local function updateTrackedRemoved(netId, removedWheels)
+    if not netId then return end
+
+    if type(removedWheels) ~= 'table' then
+        trackedRemovedWheels[netId] = nil
+        clearRestoreAttempts(netId)
+        return
+    end
+
+    local parsed = {}
+    for wheelIndex, removed in pairs(removedWheels) do
+        if removed then
+            local index = tonumber(wheelIndex)
+            if index then
+                parsed[index] = true
+            end
+        end
+    end
+
+    if next(parsed) then
+        trackedRemovedWheels[netId] = parsed
+        local attempts = pendingRestoreAttempts[netId]
+        if attempts then
+            for wheelIndex in pairs(attempts) do
+                if not parsed[wheelIndex] then
+                    attempts[wheelIndex] = nil
+                end
+            end
+            if not next(attempts) then
+                pendingRestoreAttempts[netId] = nil
+            end
+        end
+    else
+        trackedRemovedWheels[netId] = nil
+        clearRestoreAttempts(netId)
     end
 end
 
@@ -202,8 +273,9 @@ local function handleWheelStateChange(bagName, key, value)
     local netId = tonumber(idString)
     if not netId then return end
     local entity = NetworkGetEntityFromNetworkId(netId)
+    updateTrackedRemoved(netId, value)
     if entity and entity ~= 0 then
-        applyRemovedWheels(entity, value)
+        applyRemovedWheels(netId, entity, value)
         return
     end
     CreateThread(function()
@@ -211,7 +283,7 @@ local function handleWheelStateChange(bagName, key, value)
             Wait(100)
             entity = NetworkGetEntityFromNetworkId(netId)
             if entity and entity ~= 0 then
-                applyRemovedWheels(entity, value)
+                applyRemovedWheels(netId, entity, value)
                 break
             end
         end
@@ -219,6 +291,43 @@ local function handleWheelStateChange(bagName, key, value)
 end
 
 AddStateBagChangeHandler('wheelTheftRemoved', nil, handleWheelStateChange)
+
+CreateThread(function()
+    while true do
+        Wait(2000)
+
+        local cleanup = {}
+
+        for netId, wheels in pairs(trackedRemovedWheels) do
+            if type(wheels) ~= 'table' or not next(wheels) then
+                cleanup[#cleanup + 1] = netId
+            else
+                local entity = NetworkGetEntityFromNetworkId(netId)
+                if entity and entity ~= 0 and DoesEntityExist(entity) then
+                    for wheelIndex in pairs(wheels) do
+                        if vehicleWheelHasTire(entity, wheelIndex) then
+                            if canAttemptRestore(netId, wheelIndex) then
+                                noteRestoreAttempt(netId, wheelIndex)
+                                TriggerServerEvent('WheelTheft:Server:RestoreWheel', netId, wheelIndex)
+                            end
+                        end
+                    end
+                    if not next(wheels) then
+                        cleanup[#cleanup + 1] = netId
+                    end
+                end
+            end
+        end
+
+        if #cleanup > 0 then
+            for i = 1, #cleanup do
+                local netId = cleanup[i]
+                trackedRemovedWheels[netId] = nil
+                clearRestoreAttempts(netId)
+            end
+        end
+    end
+end)
 
 AddEventHandler('onResourceStop', function(resource)
     if resource ~= GetCurrentResourceName() then return end
